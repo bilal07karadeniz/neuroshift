@@ -1,21 +1,18 @@
 """
-HDC-RAG: HYPERDIMENSIONAL RETRIEVAL ENGINE
-============================================
-A retrieval engine for RAG (Retrieval-Augmented Generation) pipelines
-that uses hyperdimensional computing instead of traditional vector databases.
+HDC-RAG: HYPERDIMENSIONAL RETRIEVAL ENGINE (LEXICAL)
+=====================================================
+Encodes documents as bundles of random per-word hypervectors. Because word
+vectors are random, this matches shared WORDS, not meanings: "car" and
+"automobile" are unrelated. It is a fuzzy bag-of-words matcher.
 
-Key advantages over standard vector DBs (Pinecone, ChromaDB, etc.):
-  - Instant indexing: encoding is O(n*d), no training needed
-  - Algebraic queries: combine concepts with bind/bundle operations
-  - Tiny memory footprint: binary vectors use 8x less memory than float32
-  - GPU-native: all operations are massively parallel
-  - Compositional search: "find docs about X near Y but not Z"
+On BEIR SciFact it reaches nDCG@10 0.25, below BM25 (0.56) and far below
+embedding search (0.65), while storing 40 KB per document as float32. See
+benchmarks/bench_retrieval.py.
 
-Use cases:
-  - Fast document retrieval for LLM context windows
-  - Semantic search without embedding models
-  - Multi-concept queries (find intersection of topics)
-  - Real-time knowledge base updates (no re-indexing)
+For semantic search use neuroshift.retrieval.BinaryVectorStore, which stores
+real embeddings as bits (48 bytes per document for a 384-dim model).
+
+Kept for its compositional hypervector operations and as an HDC example.
 """
 
 import torch
@@ -28,13 +25,12 @@ from neuroshift.hdc.engine import HyperdimensionalEngine
 
 
 class HDCRetrievalEngine:
-    """Hyperdimensional Computing powered retrieval for RAG pipelines.
+    """Lexical hyperdimensional retrieval.
 
-    Instead of dense float32 embeddings, documents are encoded as
-    bipolar {-1, +1} hypervectors. This gives:
-      - 8x memory reduction vs float32 vectors
-      - Bitwise-compatible operations for extreme speed
-      - Algebraic query composition (AND, OR, NOT on concepts)
+    Documents are encoded as bipolar {-1, +1} hypervectors (stored as
+    float32) built from random word vectors, supporting algebraic query
+    composition (AND, NOT on concepts). See the module docstring for its
+    limits; prefer neuroshift.retrieval.BinaryVectorStore for semantic search.
     """
 
     def __init__(self, dimensions: int = 10000, device: str = "auto"):

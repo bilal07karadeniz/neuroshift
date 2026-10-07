@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuroshift"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI beyond neural networks: Hyperdimensional Computing, Self-Evolving Architectures, and Swarm Intelligence"
 readme = "README.md"
 license = {text = "MIT"}
@@ -20,6 +20,9 @@ keywords = [
     "anomaly-detection",
     "few-shot-learning",
     "edge-ai",
+    "binary-quantization",
+    "vector-search",
+    "rag",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -30,10 +33,18 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.0",
-    "numpy",
+    "numpy>=1.22",
 ]
 
 [project.optional-dependencies]
+embed = [
+    "sentence-transformers>=2.2",
+]
+bench = [
+    "sentence-transformers>=2.2",
+    "datasets",
+    "rank_bm25",
+]
 dev = [
     "pytest>=7.0",
     "pytest-benchmark",

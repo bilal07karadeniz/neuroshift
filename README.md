@@ -10,9 +10,79 @@ combined into hybrid systems that work where deep learning can't.
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-119%20passed-brightgreen.svg)](#tests)
+[![Tests](https://img.shields.io/badge/tests-169-brightgreen.svg)](#tests)
 
 </div>
+
+---
+
+## Start Here: Binary Semantic Retrieval
+
+`neuroshift.retrieval` stores real sentence embeddings as **1 bit per dimension** and searches them with XOR + popcount. You keep **92–97% of float32 search quality in 1/32 of the memory** (96–97% in 1/8 with 1536-bit codes), in one `.npz` file. The index itself needs only numpy; the embedding model is the only heavy dependency.
+
+```python
+from neuroshift.retrieval import BinaryVectorStore, SentenceTransformerEmbedder
+
+store = BinaryVectorStore(SentenceTransformerEmbedder())       # all-MiniLM-L6-v2
+store.add(["The automobile engine needs repair.", "Cooking pasta requires boiling water."],
+          tags=[["vehicles"], ["food"]])
+
+store.search("my car is broken", k=1)                          # -> the automobile doc
+store.search("anything", exclude_tags=["food"])                # hard tag filters
+store.search_composite(["Python", "web framework"])            # AND across concepts
+store.save("kb.npz")                                           # 48 bytes/doc + texts
+```
+
+Install with `pip install -e ".[embed]"`. Full example: [`examples/binary_rag.py`](examples/binary_rag.py).
+
+### How it works
+
+```mermaid
+graph LR
+    T["Text"] --> E["Embedding model<br/><i>meaning</i>"]
+    E --> B["sign(x) or sign(Px)<br/><i>1 bit per dim</i>"]
+    B --> S["Packed uint64 codes<br/><i>48 B/doc @ 384-d</i>"]
+    Q["Query"] --> QE["Embed"] --> H["Stage 1: Hamming scan<br/><i>XOR + popcount</i>"]
+    S --> H
+    H --> R["Stage 2: rescore shortlist<br/><i>float query vs stored bits</i>"]
+    R --> K["Top-k"]
+
+    style E fill:#4a9eff,stroke:#2d7ad4,color:#fff
+    style S fill:#51cf66,stroke:#37a34d,color:#fff
+    style R fill:#845ef7,stroke:#6741d9,color:#fff
+```
+
+- **Meaning comes from the embedding model.** The binary layer only makes storing and scanning those embeddings cheap.
+- **Two-stage search.** A Hamming scan builds a shortlist (10x k). The full-precision query then rescores the shortlist against the stored bits ("asymmetric" scoring). No float vectors are stored.
+- **`sign` vs `simhash`.** `sign` keeps one bit per dimension. `simhash` is a random projection to any bit count (LSH), which lets you trade memory for recall.
+- **Word-major layout.** Codes are stored as `(n_words, n_docs)` uint64, so a scan is a few vectorized XOR + popcount passes with no large temporaries.
+
+### Results (measured, CPU, `python -m benchmarks.bench_retrieval`)
+
+nDCG@10 on two BEIR datasets with human relevance labels, with two 384-dim embedding models, as a percentage of exact float32 search with the same model:
+
+| Method | Bytes/doc | SciFact MiniLM | NFCorpus MiniLM | SciFact BGE-small | NFCorpus BGE-small |
+|---|---:|---:|---:|---:|---:|
+| float32 exact: nDCG@10 | 1536 | 0.645 | 0.317 | 0.713 | 0.344 |
+| **binary sign 384b + rescore** (default) | **48** | **96.6%** | **93.2%** | **92.5%** | **92.5%** |
+| binary sign 384b, no rescore | 48 | 91.2% | 87.1% | 87.8% | 81.2% |
+| binary simhash 1536b + rescore | 192 | 97.4% | 96.8% | 96.5% | 96.0% |
+| binary sign 384b + rescore + center | 48 | 94.9% | 85.1% | 91.1% | 89.8% |
+| BM25 (lexical) | – | 86.8% | 84.5% | 78.5% | 77.9% |
+| old `HDCRetrievalEngine` (10k-dim) | 40000 | 38.8% | – | – | – |
+
+Rescoring is worth 4–11 points in every setting. Every binary configuration beats BM25.
+
+Scale (1M documents, 384-d, brute force, single query, 4-core CPU):
+
+| | Memory | ms/query |
+|---|---:|---:|
+| float32 matmul (multithreaded BLAS) | 1465 MB | 55 |
+| binary XOR + popcount (single-threaded numpy) | **46 MB** | **18** |
+
+**Use it when** memory is the constraint: edge devices, in-process RAG for many tenants, or millions of vectors on a laptop. Use `method="simhash", n_bits=4 * dim` when you can afford 8x instead of 32x compression. **Don't use it when** you need the last few percent of quality at any cost (use float or int8 vectors), or for 100M+ vectors (use an ANN index like FAISS/HNSW; this is a brute-force scan).
+
+Centering (subtracting the corpus mean) is available as `center=True`. It is essential for strongly anisotropic embeddings (see the tests) but hurt all four settings above, so it is off by default.
 
 ---
 
@@ -323,7 +393,9 @@ if result['is_anomaly']:
 
 ---
 
-## 5. Hybrid: HDC-RAG Engine
+## 5. Hybrid: HDC-RAG Engine (lexical, superseded)
+
+> **For semantic search use [`neuroshift.retrieval`](#start-here-binary-semantic-retrieval).** `HDCRetrievalEngine` builds document vectors from *random* per-word hypervectors, so it matches shared words, not meanings ("car" and "automobile" are unrelated). On BEIR SciFact it scores nDCG@10 0.25, below BM25 (0.56), while storing 40 KB per document. It is kept as an example of HDC compositional operations.
 
 Hyperdimensional retrieval with compositional queries. Supports AND (intersection) and NOT (exclusion) semantics through vector algebra.
 
@@ -348,21 +420,13 @@ graph TD
 
 ### Results
 
+Measured on BEIR SciFact (5,183 docs, CPU), against the replacement:
+
 ```
-  HDC-RAG Performance
-  ═══════════════════
-
-  Throughput:    1,700+ queries/sec
-  Latency:       0.55 ms/query
-  Index time:    32 ms for 20 documents
-  Memory:        0.76 MB (0.095 MB with binary quantization)
-
-  Comparison (20 documents):
-                          Latency       Memory
-  HDC-RAG                  0.55 ms       0.76 MB
-  FAISS (flat)             0.01 ms       ~5 MB     (faster, but no compositional queries)
-  Elasticsearch            ~2 ms         ~50 MB    (heavier, needs a server)
-  BM25                     0.1 ms        ~1 MB     (no semantic understanding)
+                              nDCG@10   Bytes/doc   ms/query
+  HDCRetrievalEngine            0.250       40000        356
+  BM25                          0.560           -         38
+  BinaryVectorStore (sign)      0.623          48          1   (+ query embedding time)
 ```
 
 ---
@@ -380,13 +444,14 @@ Tested on NVIDIA RTX 5070, PyTorch 2.10, CUDA 12.8.
   MorphicNet               Autonomous decisions       83
   Neural Swarm             Rastrigin best (5D)        0.084
   Anomaly Detector         F1 (from 10 examples)      95.2%
-  HDC-RAG                  Throughput                 1,700+ qps
-  HDC-RAG                  Latency                    0.55 ms
+  Binary Retrieval         nDCG@10 vs float32         92-97% at 32x less memory
+  Binary Retrieval         1M-doc scan, 1 query       18 ms, 46 MB
 ```
 
 Run benchmarks yourself:
 ```bash
 python -m benchmarks.bench_all
+pip install -e ".[bench]" && python -m benchmarks.bench_retrieval   # downloads model + BEIR data
 ```
 
 ---
@@ -428,10 +493,11 @@ quadrantChart
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e .            # core
+pip install -e ".[embed]"   # + sentence-transformers for BinaryVectorStore
 ```
 
-Requires Python 3.10+ and PyTorch 2.0+. CUDA optional but recommended.
+Requires Python 3.10+ and PyTorch 2.0+. CUDA optional. `neuroshift.retrieval` itself needs only numpy (>= 2.0 for native popcount; older numpy uses a lookup table).
 
 ## Tests
 
@@ -439,24 +505,33 @@ Requires Python 3.10+ and PyTorch 2.0+. CUDA optional but recommended.
 pytest tests/ -v
 ```
 
-119 tests covering all components:
+169 tests covering all components:
+- `test_retrieval.py` -- 50 tests (quantization, Hamming kernels, index, store, persistence)
 - `test_hdc.py` -- 32 tests (encoding, bind/bundle/permute, classification, analogy)
 - `test_morphic.py` -- 21 tests (forward pass, evolution, growth, regression)
 - `test_swarm.py` -- 30 tests (agents, population, fitness, convergence)
 - `test_hybrid.py` -- 36 tests (anomaly detection, RAG indexing/search)
 
+Known failure: `test_hybrid.py::test_detect_on_outlier_returns_high_anomaly_score`. The anomaly detector's `sign(x @ P)` encoding is scale-invariant, so it cannot see magnitude outliers.
+
 ## Project Structure
 
 ```
 neuroshift/
+  retrieval/
+    quantize.py              Float embeddings -> packed bits (sign / simhash)
+    hamming.py               Word-major XOR + popcount kernels
+    index.py                 Two-stage binary index (Hamming shortlist + rescoring)
+    store.py                 Texts, tags, concept algebra, .npz persistence
+    embedders.py             sentence-transformers / custom embedders
   hdc/engine.py              HDC core: encoding, classification, analogy
   morphic/network.py         Self-evolving neural architecture
   swarm/ecosystem.py         Neuroevolution + collective intelligence
   hybrid/
     anomaly_detector.py      Three-paradigm anomaly detection
-    hdc_rag.py               Hyperdimensional retrieval engine
+    hdc_rag.py               Lexical HDC retrieval (superseded by retrieval/)
 
-tests/                       119-test pytest suite
+tests/                       169-test pytest suite
 benchmarks/                  Performance benchmarks
 examples/                    Usage examples and demos
 ```
