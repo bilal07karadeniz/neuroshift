@@ -17,3 +17,4 @@ htmlcov/
 
 # Benchmark embedding cache
 benchmarks/.cache/
+benchmarks/results/
